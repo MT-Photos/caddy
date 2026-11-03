@@ -1,0 +1,4 @@
+# Only send build sources; never send local credentials or data.
+**
+!Dockerfile
+!docker-entrypoint.sh
