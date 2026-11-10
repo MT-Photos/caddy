@@ -14,7 +14,9 @@ if [ -d /config/Caddyfile ]; then
     exit 1
 fi
 
-if [ ! -e /config/Caddyfile ]; then
+if [ -f /config/Caddyfile.txt ]; then
+    cp /config/Caddyfile.txt /config/Caddyfile
+elif [ ! -e /config/Caddyfile ]; then
     cat > /config/Caddyfile <<'EOF'
 :80 {
     respond "Caddy is running"

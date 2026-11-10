@@ -53,11 +53,14 @@ docker buildx build --platform linux/amd64,linux/arm64 -t YOUR_REGISTRY/caddy:YO
 
 只需将宿主机的一个文件夹映射到 `/config`，无需提前创建 `Caddyfile`。
 必须直接挂载 `/config`；未挂载时容器会报错退出，不会创建配置或数据目录。
-首次启动时自动生成默认配置，已有配置不会被覆盖；若 `Caddyfile` 是目录，启动会报错，需先将其改名或移走。
+每次启动时，若 `/config/Caddyfile.txt` 存在，则将其复制并覆盖 `/config/Caddyfile`。
+若没有 `Caddyfile.txt`，则保留已有 `Caddyfile`，或在文件不存在时生成默认配置。
+若 `Caddyfile` 是目录，启动会报错，需先将其改名或移走。
 
 | 容器路径 | 用途 |
 | --- | --- |
 | `/config/Caddyfile` | 用户编辑的配置文件 |
+| `/config/Caddyfile.txt` | 可选的启动配置源，每次启动时覆盖 `Caddyfile` |
 | `/config/data/caddy/` | 证书、私钥、ACME 账户等持久化数据 |
 | `/config/runtime/caddy/` | 自动保存的 JSON 配置 |
 

@@ -1,0 +1,48 @@
+{
+    email {$dns_dnspod_email}
+
+    acme_dns tencentcloud {
+        secret_id {env.TENCENTCLOUD_SECRET_ID}
+        secret_key {env.TENCENTCLOUD_SECRET_KEY}
+    }
+
+    auto_https disable_redirects
+}
+
+:80 {
+	respond "Caddy is running"
+}
+
+(proxy_defaults) {
+	header_up X-Real-IP {remote_host}
+}
+
+# Caddy 2.10+ reuses these wildcard certificates for the site blocks below.
+# A wildcard covers exactly one DNS label, so both levels are required.
+https://*.968268.xyz, https://*.i.968268.xyz {
+	abort
+}
+
+# 40.conf
+http://kan.968268.xyz, https://kan.968268.xyz {
+	log
+	reverse_proxy 192.168.31.191:6080 {
+		import proxy_defaults
+	}
+}
+
+# 41.conf
+http://mt.968268.xyz, https://mt.968268.xyz {
+	log
+	reverse_proxy 192.168.31.191:8063 {
+		import proxy_defaults
+	}
+}
+
+# 43.conf
+http://mt.i.968268.xyz, https://mt.i.968268.xyz {
+	log
+	reverse_proxy 192.168.31.165:8062 {
+		import proxy_defaults
+	}
+}
