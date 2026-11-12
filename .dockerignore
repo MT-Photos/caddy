@@ -2,3 +2,4 @@
 **
 !Dockerfile
 !docker-entrypoint.sh
+!reload-caddy.sh
