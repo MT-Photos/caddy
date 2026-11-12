@@ -1,5 +1,5 @@
 # Build context: repository root
-ARG CADDY_VERSION=2
+ARG CADDY_VERSION=2.11.9
 
 FROM caddy:${CADDY_VERSION}-builder AS builder
 
@@ -33,6 +33,10 @@ ENV XDG_DATA_HOME=/config/data \
 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+COPY reload-caddy.sh /srv/reload-caddy.sh
+RUN chmod +x /srv/reload-caddy.sh \
+    && ln -s /srv/reload-caddy.sh /usr/local/bin/reload-caddy
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["caddy", "run", "--config", "/config/Caddyfile", "--adapter", "caddyfile"]
