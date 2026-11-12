@@ -261,7 +261,7 @@ docker exec caddy reload-caddy
 - 密码哈希不等于加密：bcrypt 是单向哈希，无法从哈希值直接还原密码。
 - NAS App 兼容性：如果反向代理的是 MT Photos，Basic Auth 可能影响移动 App 的 API、图片和视频访问，因为客户端不一定自动处理 HTTP 401 认证。
 
-官方参考：[Caddy basic_auth 文档](https://caddyserver.com/docs/caddyfile/directives/basic_auth?utm_source=chatgpt.com)。
+官方参考：[Caddy basic_auth 文档](https://caddyserver.com/docs/caddyfile/directives/basic_auth)。
 
 ### 从旧的目录映射迁移
 
