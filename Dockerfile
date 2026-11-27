@@ -1,11 +1,14 @@
 # Build context: repository root
 ARG CADDY_VERSION=2.11.9
 
-FROM caddy:${CADDY_VERSION}-builder AS builder
+FROM --platform=$BUILDPLATFORM caddy:${CADDY_VERSION}-builder AS builder
+
+ARG TARGETOS
+ARG TARGETARCH
 
 # The official builder sets CADDY_VERSION for xcaddy.
 # DNSPod's latest release uses the old libdns API; pin its libdns 1.x port.
-RUN xcaddy build \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} xcaddy build \
     --with github.com/mholt/caddy-dynamicdns \
     --with github.com/caddy-dns/tencentcloud \
     --with github.com/caddy-dns/dnspod@fb7cc31cc04c68a304b8d2672c3e5d9f2ad3d7ba \

@@ -1,0 +1,136 @@
+name: Build and Push Docker Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      caddy_version:
+        description: '可选：覆盖 Dockerfile 中的 CADDY_VERSION（留空则自动读取）'
+        required: false
+        type: string
+      push:
+        description: '是否推送到 Docker Hub（取消勾选则仅测试构建）'
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_NAME: ${{ vars.DOCKERHUB_REPO || 'mtphotos/caddy' }}
+      SHOULD_PUSH: ${{ inputs.push }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Resolve Caddy version
+        id: version
+        shell: bash
+        env:
+          INPUT_CADDY_VERSION: ${{ inputs.caddy_version }}
+        run: |
+          set -euo pipefail
+          VERSION="$(printf '%s' "${INPUT_CADDY_VERSION:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+          if [ -z "$VERSION" ]; then
+            VERSION="$(awk -F= '/^[[:space:]]*ARG[[:space:]]+CADDY_VERSION=/{sub(/#.*/, "", $2); gsub(/["'\''[:space:]]/, "", $2); print $2; exit}' Dockerfile)"
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "::error::Failed to resolve CADDY_VERSION from Dockerfile."
+            exit 1
+          fi
+          if [ "$VERSION" = "latest" ]; then
+            echo "::error::CADDY_VERSION cannot be 'latest'. Use the 'Promote to Latest' workflow to update latest."
+            exit 1
+          fi
+          if ! [[ "$VERSION" =~ ^[0-9A-Za-z._-]+$ ]]; then
+            echo "::error::Invalid CADDY_VERSION value: ${VERSION}"
+            exit 1
+          fi
+          echo "caddy_version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved CADDY_VERSION=${VERSION}"
+
+      - name: Verify Docker Hub credentials
+        id: creds
+        shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
+            echo "has_creds=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_creds=false" >> "$GITHUB_OUTPUT"
+            if [ "${SHOULD_PUSH}" = "true" ]; then
+              echo "::error::Missing DOCKERHUB_USERNAME or DOCKERHUB_TOKEN. Configure them in repository Settings -> Secrets and variables -> Actions."
+              exit 1
+            fi
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        if: ${{ steps.creds.outputs.has_creds == 'true' }}
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ steps.version.outputs.caddy_version }}
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ env.SHOULD_PUSH == 'true' }}
+          build-args: CADDY_VERSION=${{ steps.version.outputs.caddy_version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: ${{ env.SHOULD_PUSH == 'true' && 'type=gha,mode=max' || '' }}
+          provenance: false
+
+      - name: Write job summary
+        if: ${{ success() }}
+        shell: bash
+        env:
+          CADDY_VERSION: ${{ steps.version.outputs.caddy_version }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "### Docker Build Summary"
+            echo ""
+            echo "- **Image**: \`${IMAGE_NAME}\`"
+            echo "- **CADDY_VERSION**: \`${CADDY_VERSION}\`"
+            echo "- **Platforms**: \`linux/amd64, linux/arm64\`"
+            echo "- **Pushed**: \`${SHOULD_PUSH}\`"
+            echo "- **Digest**: \`${DIGEST:-N/A}\`"
+            echo ""
+            echo "**Tags:**"
+            echo '```'
+            echo "${TAGS}"
+            echo '```'
+            echo ""
+            echo "> \`latest\` 未自动更新；验证通过后请在 **Actions -> Promote to Latest** 手动触发升级。"
+          } >> "$GITHUB_STEP_SUMMARY"

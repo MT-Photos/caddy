@@ -45,6 +45,23 @@ DNSPod 固定到 `fb7cc31cc04c68a304b8d2672c3e5d9f2ad3d7ba`，该提交已适配
 
 发布前应固定经过验证的 Caddy 版本，并在 Dockerfile 的 `--with` 模块路径后添加 `@<tag或commit>` 锁定插件版本。
 
+## GitHub Actions 构建与推送
+
+项目已配置两步式手动发布工作流，支持构建 `linux/amd64` 与 `linux/arm64` 多架构镜像并推送至 Docker Hub（推送代码到 `master` 分支不会触发自动构建）：
+
+1. **构建并推送版本镜像**（[`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml)）
+   - **触发时机**：在 GitHub 仓库 **Actions -> Build and Push Docker Image -> Run workflow** 手动触发（可选填 `caddy_version` 指定或覆盖版本，或取消勾选 `push` 仅做构建测试）。
+   - **发布标签**：自动读取 `Dockerfile` 中的 `CADDY_VERSION`，推送多架构标签 `mtphotos/caddy:<CADDY_VERSION>`（**默认不推送 `latest`**）。
+2. **手动升级 `latest` 标签**（[`.github/workflows/promote-latest.yml`](.github/workflows/promote-latest.yml)）
+   - 验证版本镜像无误后，在 GitHub 仓库 **Actions -> Promote to Latest -> Run workflow** 手动点击触发（`version` 留空默认读取 `Dockerfile` 中的 `CADDY_VERSION`）。
+   - 通过 `docker buildx imagetools create` 直接将已发布的多架构版本清单指向 `mtphotos/caddy:latest`，无需重新编译，确保 `latest` 与已验证版本完全一致。
+
+- **前置配置**：在 GitHub 仓库 `Settings -> Secrets and variables -> Actions` 中配置：
+  - **Secrets**：
+    - `DOCKERHUB_USERNAME`：Docker Hub 用户名
+    - `DOCKERHUB_TOKEN`：Docker Hub Access Token（需具备 Read & Write 权限）
+  - **Variables（可选）**：
+    - `DOCKERHUB_REPO`：自定义推送目标仓库名（默认 `mtphotos/caddy`）
 
 ## 运行
 
@@ -65,7 +82,7 @@ DNSPod 固定到 `fb7cc31cc04c68a304b8d2672c3e5d9f2ad3d7ba`，该提交已适配
 | `/config/data/caddy/` | 证书、私钥、ACME 账户等持久化数据 |
 | `/config/runtime/caddy/` | 自动保存的 JSON 配置 |
 
-以下示例使用前面构建的 AMD64 本地镜像；ARM64 请将镜像标签改为 `arm`。
+Docker Hub 发布的镜像已同时支持 AMD64 和 ARM64；如使用前面本地单独构建的镜像，请将标签改为对应架构（如 `x86` 或 `arm`）。
 
 ### docker run
 

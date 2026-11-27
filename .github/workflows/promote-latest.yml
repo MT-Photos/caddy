@@ -1,0 +1,107 @@
+name: Promote to Latest
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '要升级为 latest 的镜像版本号（留空则自动读取 Dockerfile 中的 CADDY_VERSION）'
+        required: false
+        type: string
+
+concurrency:
+  group: docker-promote-latest
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  promote-latest:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_NAME: ${{ vars.DOCKERHUB_REPO || 'mtphotos/caddy' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Resolve target version
+        id: version
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION="$(printf '%s' "${INPUT_VERSION:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+          if [ -z "$VERSION" ]; then
+            VERSION="$(awk -F= '/^[[:space:]]*ARG[[:space:]]+CADDY_VERSION=/{sub(/#.*/, "", $2); gsub(/["'\''[:space:]]/, "", $2); print $2; exit}' Dockerfile)"
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "::error::Failed to resolve CADDY_VERSION from Dockerfile."
+            exit 1
+          fi
+          if [ "$VERSION" = "latest" ]; then
+            echo "::error::Target version cannot be 'latest'. Specify a concrete version tag (e.g. 2.11.9)."
+            exit 1
+          fi
+          if ! [[ "$VERSION" =~ ^[0-9A-Za-z._-]+$ ]]; then
+            echo "::error::Invalid version value: ${VERSION}"
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved target version=${VERSION}"
+
+      - name: Verify Docker Hub credentials
+        shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DOCKERHUB_USERNAME:-}" ] || [ -z "${DOCKERHUB_TOKEN:-}" ]; then
+            echo "::error::Missing DOCKERHUB_USERNAME or DOCKERHUB_TOKEN. Configure them in repository Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Verify source image exists
+        shell: bash
+        env:
+          SOURCE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "${IMAGE_NAME}:${SOURCE_VERSION}"
+
+      - name: Promote version tag to latest
+        id: promote
+        shell: bash
+        env:
+          SOURCE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create -t "${IMAGE_NAME}:latest" "${IMAGE_NAME}:${SOURCE_VERSION}"
+          DIGEST="$(docker buildx imagetools inspect "${IMAGE_NAME}:latest" | awk '/^Digest:/{print $2; exit}')"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Write job summary
+        if: ${{ success() }}
+        shell: bash
+        env:
+          SOURCE_VERSION: ${{ steps.version.outputs.version }}
+          DIGEST: ${{ steps.promote.outputs.digest }}
+        run: |
+          {
+            echo "### Promote to Latest Summary"
+            echo ""
+            echo "- **Source**: \`${IMAGE_NAME}:${SOURCE_VERSION}\`"
+            echo "- **Target**: \`${IMAGE_NAME}:latest\`"
+            echo "- **Digest**: \`${DIGEST:-N/A}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
