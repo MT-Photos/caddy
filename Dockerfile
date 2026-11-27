@@ -27,6 +27,9 @@ RUN set -eu; \
     done; \
     rm /tmp/caddy-modules
 
+# 安装 Bash
+RUN apk add --no-cache bash
+
 # Keep all user configuration and persistent state in one bind mount.
 ENV XDG_DATA_HOME=/config/data \
     XDG_CONFIG_HOME=/config/runtime
