@@ -7,8 +7,13 @@ on:
         description: '可选：覆盖 Dockerfile 中的 CADDY_VERSION（留空则自动读取）'
         required: false
         type: string
-      push:
-        description: '是否推送到 Docker Hub（取消勾选则仅测试构建）'
+      push_dockerhub:
+        description: '推送到 Docker Hub'
+        required: false
+        default: true
+        type: boolean
+      push_aliyun:
+        description: '推送到阿里云镜像仓库'
         required: false
         default: true
         type: boolean
@@ -24,8 +29,8 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     env:
-      IMAGE_NAME: ${{ vars.DOCKERHUB_REPO || 'mtphotos/caddy' }}
-      SHOULD_PUSH: ${{ inputs.push }}
+      DOCKERHUB_REPO: ${{ vars.DOCKERHUB_REPO || 'mtphotos/caddy' }}
+      ALIYUN_REGISTRY_REPO: ${{ vars.ALIYUN_REGISTRY_REPO || 'registry.cn-hangzhou.aliyuncs.com/mtphotos/caddy' }}
 
     steps:
       - name: Checkout repository
@@ -57,23 +62,91 @@ jobs:
           echo "caddy_version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Resolved CADDY_VERSION=${VERSION}"
 
-      - name: Verify Docker Hub credentials
-        id: creds
+      - name: Resolve targets and verify credentials
+        id: targets
         shell: bash
         env:
+          PUSH_DOCKERHUB: ${{ inputs.push_dockerhub }}
+          PUSH_ALIYUN: ${{ inputs.push_aliyun }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          ALIYUN_REGISTRY_USERNAME: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
+          ALIYUN_REGISTRY_PASSWORD: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
         run: |
           set -euo pipefail
-          if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
-            echo "has_creds=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_creds=false" >> "$GITHUB_OUTPUT"
-            if [ "${SHOULD_PUSH}" = "true" ]; then
-              echo "::error::Missing DOCKERHUB_USERNAME or DOCKERHUB_TOKEN. Configure them in repository Settings -> Secrets and variables -> Actions."
+
+          NORMALIZED_DOCKERHUB_REPO="$(printf '%s' "${DOCKERHUB_REPO}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
+          NORMALIZED_ALIYUN_REPO="$(printf '%s' "${ALIYUN_REGISTRY_REPO}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
+
+          if [ "${PUSH_DOCKERHUB}" = "true" ] || [ "${PUSH_ALIYUN}" != "true" ]; then
+            if [ -z "${NORMALIZED_DOCKERHUB_REPO}" ] || [[ "${NORMALIZED_DOCKERHUB_REPO}" =~ [[:space:]] ]] || [[ "${NORMALIZED_DOCKERHUB_REPO}" == *"://"* ]] || [[ "${NORMALIZED_DOCKERHUB_REPO}" != */* ]]; then
+              echo "::error::Invalid DOCKERHUB_REPO '${DOCKERHUB_REPO}'. Expected '<namespace>/<repo>' without scheme or spaces."
               exit 1
             fi
           fi
+
+          ALIYUN_HOST=""
+          if [ "${PUSH_ALIYUN}" = "true" ]; then
+            if [ -z "${NORMALIZED_ALIYUN_REPO}" ] || [[ "${NORMALIZED_ALIYUN_REPO}" =~ [[:space:]] ]] || [[ "${NORMALIZED_ALIYUN_REPO}" == *"://"* ]] || [[ "${NORMALIZED_ALIYUN_REPO}" != */*/* ]]; then
+              echo "::error::Invalid ALIYUN_REGISTRY_REPO '${ALIYUN_REGISTRY_REPO}'. Expected '<registry-host>/<namespace>/<repo>' without scheme or spaces."
+              exit 1
+            fi
+            ALIYUN_HOST="${NORMALIZED_ALIYUN_REPO%%/*}"
+            if [ -z "${ALIYUN_HOST}" ]; then
+              echo "::error::Failed to extract registry host from ALIYUN_REGISTRY_REPO '${ALIYUN_REGISTRY_REPO}'."
+              exit 1
+            fi
+          fi
+
+          HAS_DOCKERHUB_CREDS="false"
+          if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
+            HAS_DOCKERHUB_CREDS="true"
+          fi
+
+          HAS_ALIYUN_CREDS="false"
+          if [ -n "${ALIYUN_REGISTRY_USERNAME:-}" ] && [ -n "${ALIYUN_REGISTRY_PASSWORD:-}" ]; then
+            HAS_ALIYUN_CREDS="true"
+          fi
+
+          if [ "${PUSH_DOCKERHUB}" = "true" ] && [ "${HAS_DOCKERHUB_CREDS}" != "true" ]; then
+            echo "::error::Missing DOCKERHUB_USERNAME or DOCKERHUB_TOKEN. Configure them in repository Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+
+          if [ "${PUSH_ALIYUN}" = "true" ] && [ "${HAS_ALIYUN_CREDS}" != "true" ]; then
+            echo "::error::Missing ALIYUN_REGISTRY_USERNAME or ALIYUN_REGISTRY_PASSWORD. Configure them in repository Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+
+          IMAGES=()
+          if [ "${PUSH_DOCKERHUB}" = "true" ]; then
+            IMAGES+=("${NORMALIZED_DOCKERHUB_REPO}")
+          fi
+          if [ "${PUSH_ALIYUN}" = "true" ]; then
+            IMAGES+=("${NORMALIZED_ALIYUN_REPO}")
+          fi
+
+          SHOULD_PUSH="false"
+          if [ "${#IMAGES[@]}" -gt 0 ]; then
+            SHOULD_PUSH="true"
+          else
+            IMAGES+=("${NORMALIZED_DOCKERHUB_REPO}")
+          fi
+
+          LOGIN_ALIYUN="false"
+          if [ "${PUSH_ALIYUN}" = "true" ]; then
+            LOGIN_ALIYUN="true"
+          fi
+
+          {
+            echo "should_push=${SHOULD_PUSH}"
+            echo "login_dockerhub=${HAS_DOCKERHUB_CREDS}"
+            echo "login_aliyun=${LOGIN_ALIYUN}"
+            echo "aliyun_registry_host=${ALIYUN_HOST}"
+            echo "images<<EOF_IMAGES"
+            printf '%s\n' "${IMAGES[@]}"
+            echo "EOF_IMAGES"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -82,17 +155,25 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Log in to Docker Hub
-        if: ${{ steps.creds.outputs.has_creds == 'true' }}
+        if: ${{ steps.targets.outputs.login_dockerhub == 'true' }}
         uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Log in to Aliyun ACR
+        if: ${{ steps.targets.outputs.login_aliyun == 'true' }}
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ steps.targets.outputs.aliyun_registry_host }}
+          username: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
+          password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.IMAGE_NAME }}
+          images: ${{ steps.targets.outputs.images }}
           tags: |
             type=raw,value=${{ steps.version.outputs.caddy_version }}
 
@@ -102,12 +183,12 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: ${{ env.SHOULD_PUSH == 'true' }}
+          push: ${{ steps.targets.outputs.should_push == 'true' }}
           build-args: CADDY_VERSION=${{ steps.version.outputs.caddy_version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
-          cache-to: ${{ env.SHOULD_PUSH == 'true' && 'type=gha,mode=max' || '' }}
+          cache-to: ${{ steps.targets.outputs.should_push == 'true' && 'type=gha,mode=max' || '' }}
           provenance: false
 
       - name: Write job summary
@@ -115,13 +196,13 @@ jobs:
         shell: bash
         env:
           CADDY_VERSION: ${{ steps.version.outputs.caddy_version }}
+          SHOULD_PUSH: ${{ steps.targets.outputs.should_push }}
           TAGS: ${{ steps.meta.outputs.tags }}
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           {
             echo "### Docker Build Summary"
             echo ""
-            echo "- **Image**: \`${IMAGE_NAME}\`"
             echo "- **CADDY_VERSION**: \`${CADDY_VERSION}\`"
             echo "- **Platforms**: \`linux/amd64, linux/arm64\`"
             echo "- **Pushed**: \`${SHOULD_PUSH}\`"

@@ -7,6 +7,16 @@ on:
         description: '要升级为 latest 的镜像版本号（留空则自动读取 Dockerfile 中的 CADDY_VERSION）'
         required: false
         type: string
+      promote_dockerhub:
+        description: '升级 Docker Hub 的 latest 标签'
+        required: false
+        default: true
+        type: boolean
+      promote_aliyun:
+        description: '升级阿里云镜像仓库的 latest 标签'
+        required: false
+        default: true
+        type: boolean
 
 concurrency:
   group: docker-promote-latest
@@ -19,7 +29,8 @@ jobs:
   promote-latest:
     runs-on: ubuntu-latest
     env:
-      IMAGE_NAME: ${{ vars.DOCKERHUB_REPO || 'mtphotos/caddy' }}
+      DOCKERHUB_REPO: ${{ vars.DOCKERHUB_REPO || 'mtphotos/caddy' }}
+      ALIYUN_REGISTRY_REPO: ${{ vars.ALIYUN_REGISTRY_REPO || 'registry.cn-hangzhou.aliyuncs.com/mtphotos/caddy' }}
 
     steps:
       - name: Checkout repository
@@ -51,57 +62,146 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Resolved target version=${VERSION}"
 
-      - name: Verify Docker Hub credentials
+      - name: Resolve targets and verify credentials
+        id: targets
         shell: bash
         env:
+          PROMOTE_DOCKERHUB: ${{ inputs.promote_dockerhub }}
+          PROMOTE_ALIYUN: ${{ inputs.promote_aliyun }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          ALIYUN_REGISTRY_USERNAME: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
+          ALIYUN_REGISTRY_PASSWORD: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
         run: |
           set -euo pipefail
-          if [ -z "${DOCKERHUB_USERNAME:-}" ] || [ -z "${DOCKERHUB_TOKEN:-}" ]; then
+
+          if [ "${PROMOTE_DOCKERHUB}" != "true" ] && [ "${PROMOTE_ALIYUN}" != "true" ]; then
+            echo "::error::At least one target registry must be enabled."
+            exit 1
+          fi
+
+          NORMALIZED_DOCKERHUB_REPO="$(printf '%s' "${DOCKERHUB_REPO}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
+          NORMALIZED_ALIYUN_REPO="$(printf '%s' "${ALIYUN_REGISTRY_REPO}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
+
+          if [ "${PROMOTE_DOCKERHUB}" = "true" ]; then
+            if [ -z "${NORMALIZED_DOCKERHUB_REPO}" ] || [[ "${NORMALIZED_DOCKERHUB_REPO}" =~ [[:space:]] ]] || [[ "${NORMALIZED_DOCKERHUB_REPO}" == *"://"* ]] || [[ "${NORMALIZED_DOCKERHUB_REPO}" != */* ]]; then
+              echo "::error::Invalid DOCKERHUB_REPO '${DOCKERHUB_REPO}'. Expected '<namespace>/<repo>' without scheme or spaces."
+              exit 1
+            fi
+          fi
+
+          ALIYUN_HOST=""
+          if [ "${PROMOTE_ALIYUN}" = "true" ]; then
+            if [ -z "${NORMALIZED_ALIYUN_REPO}" ] || [[ "${NORMALIZED_ALIYUN_REPO}" =~ [[:space:]] ]] || [[ "${NORMALIZED_ALIYUN_REPO}" == *"://"* ]] || [[ "${NORMALIZED_ALIYUN_REPO}" != */*/* ]]; then
+              echo "::error::Invalid ALIYUN_REGISTRY_REPO '${ALIYUN_REGISTRY_REPO}'. Expected '<registry-host>/<namespace>/<repo>' without scheme or spaces."
+              exit 1
+            fi
+            ALIYUN_HOST="${NORMALIZED_ALIYUN_REPO%%/*}"
+            if [ -z "${ALIYUN_HOST}" ]; then
+              echo "::error::Failed to extract registry host from ALIYUN_REGISTRY_REPO '${ALIYUN_REGISTRY_REPO}'."
+              exit 1
+            fi
+          fi
+
+          if [ "${PROMOTE_DOCKERHUB}" = "true" ] && { [ -z "${DOCKERHUB_USERNAME:-}" ] || [ -z "${DOCKERHUB_TOKEN:-}" ]; }; then
             echo "::error::Missing DOCKERHUB_USERNAME or DOCKERHUB_TOKEN. Configure them in repository Settings -> Secrets and variables -> Actions."
             exit 1
           fi
+
+          if [ "${PROMOTE_ALIYUN}" = "true" ] && { [ -z "${ALIYUN_REGISTRY_USERNAME:-}" ] || [ -z "${ALIYUN_REGISTRY_PASSWORD:-}" ]; }; then
+            echo "::error::Missing ALIYUN_REGISTRY_USERNAME or ALIYUN_REGISTRY_PASSWORD. Configure them in repository Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+
+          IMAGES=()
+          if [ "${PROMOTE_DOCKERHUB}" = "true" ]; then
+            IMAGES+=("${NORMALIZED_DOCKERHUB_REPO}")
+          fi
+          if [ "${PROMOTE_ALIYUN}" = "true" ]; then
+            IMAGES+=("${NORMALIZED_ALIYUN_REPO}")
+          fi
+
+          {
+            echo "promote_dockerhub=${PROMOTE_DOCKERHUB}"
+            echo "promote_aliyun=${PROMOTE_ALIYUN}"
+            echo "aliyun_registry_host=${ALIYUN_HOST}"
+            echo "images<<EOF_IMAGES"
+            printf '%s\n' "${IMAGES[@]}"
+            echo "EOF_IMAGES"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
       - name: Log in to Docker Hub
+        if: ${{ steps.targets.outputs.promote_dockerhub == 'true' }}
         uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Verify source image exists
+      - name: Log in to Aliyun ACR
+        if: ${{ steps.targets.outputs.promote_aliyun == 'true' }}
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ steps.targets.outputs.aliyun_registry_host }}
+          username: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
+          password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+
+      - name: Verify source images exist and are multi-arch
         shell: bash
         env:
           SOURCE_VERSION: ${{ steps.version.outputs.version }}
+          TARGET_IMAGES: ${{ steps.targets.outputs.images }}
         run: |
           set -euo pipefail
-          docker buildx imagetools inspect "${IMAGE_NAME}:${SOURCE_VERSION}"
+          while IFS= read -r REPO; do
+            [ -z "$REPO" ] && continue
+            echo "Inspecting ${REPO}:${SOURCE_VERSION}"
+            INSPECT_OUTPUT="$(docker buildx imagetools inspect "${REPO}:${SOURCE_VERSION}")"
+            printf '%s\n' "${INSPECT_OUTPUT}"
+            if ! printf '%s\n' "${INSPECT_OUTPUT}" | grep -Eq '^[[:space:]]*Platform:[[:space:]]*linux/amd64([[:space:]]|$)'; then
+              echo "::error::${REPO}:${SOURCE_VERSION} is missing linux/amd64 manifest; refusing to promote to latest."
+              exit 1
+            fi
+            if ! printf '%s\n' "${INSPECT_OUTPUT}" | grep -Eq '^[[:space:]]*Platform:[[:space:]]*linux/arm64(/v8)?([[:space:]]|$)'; then
+              echo "::error::${REPO}:${SOURCE_VERSION} is missing linux/arm64 manifest; refusing to promote to latest."
+              exit 1
+            fi
+          done <<< "$TARGET_IMAGES"
 
       - name: Promote version tag to latest
         id: promote
         shell: bash
         env:
           SOURCE_VERSION: ${{ steps.version.outputs.version }}
+          TARGET_IMAGES: ${{ steps.targets.outputs.images }}
         run: |
           set -euo pipefail
-          docker buildx imagetools create -t "${IMAGE_NAME}:latest" "${IMAGE_NAME}:${SOURCE_VERSION}"
-          DIGEST="$(docker buildx imagetools inspect "${IMAGE_NAME}:latest" | awk '/^Digest:/{print $2; exit}')"
-          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          SUMMARY_ROWS=""
+          while IFS= read -r REPO; do
+            [ -z "$REPO" ] && continue
+            docker buildx imagetools create -t "${REPO}:latest" "${REPO}:${SOURCE_VERSION}"
+            DIGEST="$(docker buildx imagetools inspect "${REPO}:latest" | awk '/^Digest:/{print $2; exit}')"
+            SUMMARY_ROWS="${SUMMARY_ROWS}| \`${REPO}:${SOURCE_VERSION}\` | \`${REPO}:latest\` | \`${DIGEST:-N/A}\` |"$'\n'
+          done <<< "$TARGET_IMAGES"
+
+          {
+            echo "summary_rows<<EOF_ROWS"
+            printf '%s' "${SUMMARY_ROWS}"
+            echo "EOF_ROWS"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Write job summary
         if: ${{ success() }}
         shell: bash
         env:
-          SOURCE_VERSION: ${{ steps.version.outputs.version }}
-          DIGEST: ${{ steps.promote.outputs.digest }}
+          SUMMARY_ROWS: ${{ steps.promote.outputs.summary_rows }}
         run: |
           {
             echo "### Promote to Latest Summary"
             echo ""
-            echo "- **Source**: \`${IMAGE_NAME}:${SOURCE_VERSION}\`"
-            echo "- **Target**: \`${IMAGE_NAME}:latest\`"
-            echo "- **Digest**: \`${DIGEST:-N/A}\`"
+            echo "| Source | Target | Digest |"
+            echo "| --- | --- | --- |"
+            printf '%s\n' "${SUMMARY_ROWS}"
           } >> "$GITHUB_STEP_SUMMARY"

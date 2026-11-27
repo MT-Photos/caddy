@@ -47,21 +47,24 @@ DNSPod 固定到 `fb7cc31cc04c68a304b8d2672c3e5d9f2ad3d7ba`，该提交已适配
 
 ## GitHub Actions 构建与推送
 
-项目已配置两步式手动发布工作流，支持构建 `linux/amd64` 与 `linux/arm64` 多架构镜像并推送至 Docker Hub（推送代码到 `master` 分支不会触发自动构建）：
+项目已配置两步式手动发布工作流，支持**单次编译**同时构建 `linux/amd64` 与 `linux/arm64` 多架构镜像并推送至 **Docker Hub**（`mtphotos/caddy`）与 **阿里云镜像仓库**（`registry.cn-hangzhou.aliyuncs.com/mtphotos/caddy`）（推送代码到 `master` 分支不会触发自动构建）：
 
 1. **构建并推送版本镜像**（[`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml)）
-   - **触发时机**：在 GitHub 仓库 **Actions -> Build and Push Docker Image -> Run workflow** 手动触发（可选填 `caddy_version` 指定或覆盖版本，或取消勾选 `push` 仅做构建测试）。
-   - **发布标签**：自动读取 `Dockerfile` 中的 `CADDY_VERSION`，推送多架构标签 `mtphotos/caddy:<CADDY_VERSION>`（**默认不推送 `latest`**）。
+   - **触发时机**：在 GitHub 仓库 **Actions -> Build and Push Docker Image -> Run workflow** 手动触发（可选填 `caddy_version` 指定或覆盖版本，并通过 `push_dockerhub`、`push_aliyun` 勾选目标仓库；全部取消勾选则仅做构建测试）。
+   - **发布标签**：自动读取 `Dockerfile` 中的 `CADDY_VERSION`，推送多架构标签 `<仓库>:<CADDY_VERSION>`（**默认不推送 `latest`**）。
 2. **手动升级 `latest` 标签**（[`.github/workflows/promote-latest.yml`](.github/workflows/promote-latest.yml)）
-   - 验证版本镜像无误后，在 GitHub 仓库 **Actions -> Promote to Latest -> Run workflow** 手动点击触发（`version` 留空默认读取 `Dockerfile` 中的 `CADDY_VERSION`）。
-   - 通过 `docker buildx imagetools create` 直接将已发布的多架构版本清单指向 `mtphotos/caddy:latest`，无需重新编译，确保 `latest` 与已验证版本完全一致。
+   - 验证版本镜像无误后，在 GitHub 仓库 **Actions -> Promote to Latest -> Run workflow** 手动点击触发（`version` 留空默认读取 `Dockerfile` 中的 `CADDY_VERSION`，可通过 `promote_dockerhub`、`promote_aliyun` 勾选目标仓库）。
+   - 通过 `docker buildx imagetools create` 直接将已发布的多架构版本清单指向 `<仓库>:latest`，无需重新编译，确保 `latest` 与已验证版本完全一致。
 
 - **前置配置**：在 GitHub 仓库 `Settings -> Secrets and variables -> Actions` 中配置：
   - **Secrets**：
     - `DOCKERHUB_USERNAME`：Docker Hub 用户名
     - `DOCKERHUB_TOKEN`：Docker Hub Access Token（需具备 Read & Write 权限）
+    - `ALIYUN_REGISTRY_USERNAME`：阿里云容器镜像服务登录用户名
+    - `ALIYUN_REGISTRY_PASSWORD`：阿里云容器镜像服务登录密码（固定密码或访问凭证）
   - **Variables（可选）**：
-    - `DOCKERHUB_REPO`：自定义推送目标仓库名（默认 `mtphotos/caddy`）
+    - `DOCKERHUB_REPO`：自定义 Docker Hub 推送目标仓库名（默认 `mtphotos/caddy`）
+    - `ALIYUN_REGISTRY_REPO`：自定义阿里云推送目标仓库地址（默认 `registry.cn-hangzhou.aliyuncs.com/mtphotos/caddy`）
 
 ## 运行
 
